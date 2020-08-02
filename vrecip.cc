@@ -235,50 +235,42 @@ void verilog()
   printf("endmodule\n");
 }
 
-void test()
+void test(int testn)
 {
+
+  uint32_t first   = 0;
+  uint32_t firstsq = 0;
+  uint32_t last    = 0x7f7fffff;
+
+  if (testn == 1) {          // fast test that covers LUT
+       first   = 0x3F000000;
+       firstsq = 0x3E800000;
+       last    = 0x3F800000;
+  }
+
   double max_error = 0;
 
-  for (uint32_t i = 0x3F000000; i <= 0x3F800000; i++) {
+  for (uint32_t i = first; i <= last; i++) {
     f32_union r = i;
-    double error = 1.0 - recip(r.f) * r.f;
-    max_error = fmax(fabs(error), max_error);
-  }
-  printf("max recip error on [0.5, 1]: 2^%g\n", log2(max_error));
-
-  max_error = 0;
-  for (uint32_t i = 0x3E800000; i <= 0x3F800000; i++) {
-    f32_union r = i;
-    double error = 1.0 - rsqrt(r.f) * sqrt(r.f);
-    max_error = fmax(fabs(error), max_error);
-  }
-  printf("max rsqrt error on [0.25, 1]: 2^%g\n", log2(max_error));
-}
-
-void test_slow()
-{
-  double max_error = 0;
-
-  for (uint32_t i = 0x0; i <= 0x7f7fffff; i++) {
-    f32_union r = i;
-    float rcp = recip(r.f);
-    double error = 1.0 - rcp * r.f;
+    double rcp = recip(r.f);
+    double error = 1.0 - rcp * double(r.f);
 
     if (!isfinite(rcp)) {
       assert(!isfinite(1.0f / r.f));
     } else {
       max_error = fmax(fabs(error), max_error);
-    }
-  }
+    } }
   printf("max recip error: 2^%g\n", log2(max_error));
 
   max_error = 0;
-  for (uint32_t i = 0; i <= 0x7f7fffff; i++) {
+
+  for (uint32_t i = firstsq; i <= last; i++) {
     f32_union r = i;
-    double error = 1.0 - rsqrt(r.f) * sqrt(r.f);
+    double error = 1.0 - double(rsqrt(r.f)) * sqrt(double(r.f));
     max_error = fmax(fabs(error), max_error);
   }
   printf("max rsqrt error: 2^%g\n", log2(max_error));
+
 }
 
 int main(int argc, char** argv)
@@ -291,12 +283,12 @@ int main(int argc, char** argv)
   }
 
   if (argc == 2 && strcmp(argv[1], "--test") == 0) {
-    test();
+    test(1);
     return 0;
   }
 
   if (argc == 2 && strcmp(argv[1], "--test-long") == 0) {
-    test_slow();
+    test(2);
     return 0;
   }
 
