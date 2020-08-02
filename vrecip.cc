@@ -9,6 +9,8 @@
 #include <fenv.h>
 #include <float.h>
 #include <algorithm>
+#include <vector>
+#include <iostream>
 
 #if !defined(__STDC_IEC_559__) && !defined(__APPLE__)
 # error Need IEEE 754 FP
@@ -25,30 +27,37 @@ union f32_union {
   f32_union(float f) : f(f) {}
 };
 
-#define P 7                // precision of approximation
+
+using std::string;
+using std::vector;
+
 #define S 23               // significand bits in binary32
 #define E 8                // exponent bits in binary32
 #define B ((1UL<<(E-1))-1) // binary32 exponent bias
-#define N (1UL<<P)         // number of LUT entries
+
+int ip = 0, op= 0;  // ip is input index width, op is output estimate width
+int ipN;            // number of elements in LUT based on ip
+
+#define ipMax   10
+#define N (1UL<<ipMax)        // max number of LUT entries
 
 uint32_t rsqrt_lut[N];
 uint32_t recip_lut[N];
 
-#define rsqrt_lut_idx(sig, exp) (((sig) >> (S-P+1)) | ((exp & 1UL) << (P-1)))
-#define recip_lut_idx(sig) ((sig) >> (S-P))
+#define rsqrt_lut_idx(sig, exp) (((sig) >> (S-ip+1)) | ((exp & 1UL) << (ip-1)))
+#define recip_lut_idx(sig) ((sig) >> (S-ip))
 
 uint32_t estimate_rsqrt_sig(uint32_t idx)
 {
-  const int ip = P, op = P;
 
-  // P-bit index corresponds to {exp[0], sig[S-1:S-(P-1)]}
+  // P-bit index corresponds to {exp[0], sig[S-1:S-(ip-1)]}
   uint32_t exp = (idx >> (ip-1)) ? B-2 : B-1; // 1 bit from exp -> [0.25, 1.0)
-  uint32_t sig = (idx & ((1UL<<(ip-1))-1)) << (S-(ip-1)); // P-1 bits from sig
+  uint32_t sig = (idx & ((1UL<<(ip-1))-1)) << (S-(ip-1)); // ip-1 bits from sig
 
   // sqrt(leftmost point on interval)
   // (If P is increased substantially, need to increase precision beyond double.)
   f32_union in = (exp << S) | sig;
-  double left = sqrt(in.f);
+  double left = sqrt(double(in.f));
 
   // sqrt(rightmost point on interval)
   f32_union in1 = in.i + (1UL<<(S-ip+1));
@@ -76,9 +85,8 @@ uint32_t estimate_rsqrt_sig(uint32_t idx)
 
 uint32_t estimate_recip_sig(uint32_t idx)
 {
-  const int ip = P, op = P;
 
-  // P-bit index corresponds to sig[S-1:S-P]
+  // P-bit index corresponds to sig[S-1:S-ip]
   uint32_t sig = idx << (S-ip);
   uint32_t exp = B-1; // [0.5, 1.0)
 
@@ -141,7 +149,7 @@ float rsqrt(float a)
     sig = (sig << 1) & ((1UL<<S)-1);
   }
 
-  uint32_t out_sig = rsqrt_lut[rsqrt_lut_idx(sig, exp)] << (S-P);
+  uint32_t out_sig = rsqrt_lut[rsqrt_lut_idx(sig, exp)] << (S-op);
   uint32_t out_exp = (3 * B + ~exp) / 2;
   f32_union res = (out_exp << S) | out_sig;
   return res.f;
@@ -188,7 +196,7 @@ float recip(float a)
   }
 
   uint32_t out_exp = 2 * B + ~exp;
-  uint32_t out_sig = recip_lut[recip_lut_idx(sig)] << (S-P);
+  uint32_t out_sig = recip_lut[recip_lut_idx(sig)] << (S-op);
 
   if (out_exp == 0 || out_exp == (uint32_t)-1) {
     // the result is subnormal, but don't raise the underflow exception,
@@ -206,7 +214,7 @@ float recip(float a)
 
 void populate_luts()
 {
-  for (size_t i = 0; i < N; i++) {
+  for (size_t i = 0; i < ipN; i++) {
     rsqrt_lut[i] = estimate_rsqrt_sig(i);
     recip_lut[i] = estimate_recip_sig(i);
   }
@@ -214,22 +222,23 @@ void populate_luts()
 
 void verilog()
 {
-  printf("module RSqrt%dLUT (input [%d:0] in, output reg [%d:0] out);\n", P, P-1, P-1);
-  printf("  // in[%d] corresponds to exp[0]\n", P-1);
-  printf("  // in[%d:0] corresponds to sig[S-1:S-%d]\n", P-2, P-2);
-  printf("  // out[%d:0] corresponds to sig[S-1:S-%d]\n", P-1, P-1);
+  printf("module RSqrt%dx%dLUT (input [%d:0] in, output reg [%d:0] out);\n", ip, op, ip-1, op-1);
+  printf("  // in[%d] corresponds to exp[0]\n", ip-1);
+  printf("  // in[%d:0] corresponds to sig[S-1:S-%d]\n", ip-2, ip-2);
+  printf("  // out[%d:0] corresponds to sig[S-1:S-%d]\n", op-1, op-1);
   printf("  always @(*)\n");
   printf("    case (in)\n");
-  for (size_t i = 0; i < N; i++)
+  for (size_t i = 0; i < ipN; i++)
     printf("      %zu: out = %" PRIu32 ";\n", i, rsqrt_lut[i]);
   printf("    endcase\n");
   printf("endmodule\n");
 
-  printf("module Recip%dLUT (input [%d:0] in, output reg [%d:0] out);\n", P, P-1, P-1);
-  printf("  // in[%d:0] and out[%d:0] correspond to sig[S-1:S-%d]\n", P-1, P-1, P-1);
+  printf("module Recip%dx%dLUT (input [%d:0] in, output reg [%d:0] out);\n", ip, op, ip-1, op-1);
+  printf("  // in[%d:0]  corresponds to sig[S-1:S-%d]\n", ip-1, ip-1);
+  printf("  // out[%d:0] corresponds to sig[S-1:S-%d]\n", op-1, op-1);
   printf("  always @(*)\n");
   printf("    case (in)\n");
-  for (size_t i = 0; i < N; i++)
+  for (size_t i = 0; i < ipN; i++)
     printf("      %zu: out = %" PRIu32 ";\n", i, recip_lut[i]);
   printf("    endcase\n");
   printf("endmodule\n");
@@ -260,7 +269,8 @@ void test(int testn)
     } else {
       max_error = fmax(fabs(error), max_error);
     } }
-  printf("max recip error: 2^%g\n", log2(max_error));
+  printf("max recip %dx%d error: 2^%g\n", ip, op, log2(max_error));
+
 
   max_error = 0;
 
@@ -269,29 +279,68 @@ void test(int testn)
     double error = 1.0 - double(rsqrt(r.f)) * sqrt(double(r.f));
     max_error = fmax(fabs(error), max_error);
   }
-  printf("max rsqrt error: 2^%g\n", log2(max_error));
+  printf("max rsqrt %dx%d error: 2^%g\n", ip, op, log2(max_error));
 
 }
 
 int main(int argc, char** argv)
 {
+
+  // handle arguements
+
+  int verilogn = 0;  // print verilog LUT definition
+  int testn    = 0;  // 1 is short test, 2 is long test
+  int summary  = 1;  // default 1 line summary of inputs and informatives
+
+  if (argc > 1) {
+    vector<string> args(argv + 0, argv + (argc));
+    for(vector<string>::iterator it = args.begin(); it != args.end(); ++it) {
+      if(*it == "--verilog")
+        verilogn = 1;
+      if(*it == "--test")
+        testn = 1;
+      if(*it == "--test-long")
+        testn = 2;
+      if(*it == "--nosum")
+        summary = 0;
+   }
+  } else {
+    printf(" No arguments were provided\n");
+    printf(" parameters seperated by spaces are\n");
+    printf(" optional index-size(default 7 in bits), estimate size (both in bits )\n");
+    printf(" these can be followed by\n --verilog to print out LUT table definition \n");
+    printf(" --test to test minimal range that covers the LUT table (default) -or- \n");
+    printf(" --test-long which tests all single float non-NaN values\n");
+    return (-1);
+  }
+
+  if (argc>1) ip= strtoul(argv[1], NULL, 10);
+  if (ip>ipMax || ip <= 0) {
+    if (summary > 0) printf("index of estimates, ip=%d, out of range reset to default\n",ip);
+    ip = 0;
+  }
+
+  if (argc>2) op= strtoul(argv[2], NULL, 10);
+  if (op>20 || op <= 0) {
+    if (summary > 0) printf("estimate width, op=%d, out of range reset to default\n",op);
+    op = 0;
+  }
+
+  if (ip==0) ip = 7; // default to 7x7
+  if (op==0) op = ip;
+
+  ipN = (1UL<<ip);
+
+if (verilogn == 0 && testn==0) testn = 1;
+
+  if (summary > 0)
+    printf ("ip %d op %d LUT #bits %d verilog %d  test/test-long %d \n",
+                ip, op, int((1UL <<ip) * op), verilogn, testn);
+
   populate_luts();
 
-  if (argc == 2 && strcmp(argv[1], "--verilog") == 0) {
-    verilog();
-    return 0;
-  }
+  if (verilogn == 1) verilog();
+  else if (testn==0) testn = 1;
 
-  if (argc == 2 && strcmp(argv[1], "--test") == 0) {
-    test(1);
-    return 0;
-  }
-
-  if (argc == 2 && strcmp(argv[1], "--test-long") == 0) {
-    test(2);
-    return 0;
-  }
-
-  printf("Invoke me with --verilog, --test, or --test-long\n");
-  return 1;
+  if (testn != 0) test(testn);
 }
