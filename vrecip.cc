@@ -259,8 +259,8 @@ void verilog()
   printf("  // out[%d:0] corresponds to sig[S-1:S-%d]\n", op-1, op-1);
   printf("  always @(*)\n");
   printf("    case (in)\n");
-  for (size_t i = 0; i < ipN; i++)
-  printf("      %zu: out = %" PRIu32 ",;\n", i, rsqrt_lut[i]);
+  for (size_t i = ipN/2; i < ipN+ipN/2; i++) 
+    printf("      %zu: out = %" PRIu32 ";\n", ((i+(ipN/2)) % ipN), rsqrt_lut[i % ipN ]);
   printf("    endcase\n");
   printf("endmodule\n");
 
