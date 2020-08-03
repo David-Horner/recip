@@ -44,14 +44,33 @@ int ipN;            // number of elements in LUT based on ip
 uint32_t rsqrt_lut[N];
 uint32_t recip_lut[N];
 
-#define rsqrt_lut_idx(sig, exp) (((sig) >> (S-ip+1)) | ((exp & 1UL) << (ip-1)))
+#define RIGHT 1
+#define LEFT  2
+#define OTHER 3
+#define RERR  4
+#define LERR  5
+#define OERR  6
+#define IDXN  RIGHT|LEFT|OTHER|RERR|LERR|OERR
+
+
+double rsqrt_lut_errf[N][IDXN];   // error val per LUT entry
+double recip_lut_errf[N][IDXN];
+
+// input arguments settings
+  int verilogn = 0;  // print verilog LUT definition
+  int testn    = 0;  // 1 is short test, 2 is long test
+  int detailn  = 0;  // prints LUT entry values/errors
+  int summary  = 1;  // default 1 line summary of inputs and informatives
+
+
+#define rsqrt_lut_idx(sig, exp) (((sig) >> (S-ip+1)) | ((~exp & 1UL) << (ip-1)))
 #define recip_lut_idx(sig) ((sig) >> (S-ip))
 
 uint32_t estimate_rsqrt_sig(uint32_t idx)
 {
 
   // P-bit index corresponds to {exp[0], sig[S-1:S-(ip-1)]}
-  uint32_t exp = (idx >> (ip-1)) ? B-2 : B-1; // 1 bit from exp -> [0.25, 1.0)
+  uint32_t exp = (idx >> (ip-1)) ? B-1 : B-2; // 1 bit from exp -> [0.25, 1.0)
   uint32_t sig = (idx & ((1UL<<(ip-1))-1)) << (S-(ip-1)); // ip-1 bits from sig
 
   // sqrt(leftmost point on interval)
@@ -61,7 +80,7 @@ uint32_t estimate_rsqrt_sig(uint32_t idx)
 
   // sqrt(rightmost point on interval)
   f32_union in1 = in.i + (1UL<<(S-ip+1));
-  double right = sqrt(nextafter(double(in1.f), 0.0));
+  double right = sqrt(         (double(in1.f)     ));
 
   // Naively search the space of 2^P output values for the one that minimizes
   // the maximum error on the interval.  Since the function is monotonic,
@@ -71,11 +90,17 @@ uint32_t estimate_rsqrt_sig(uint32_t idx)
   f32_union best = 0.0f;
   f32_union base = B << S; // [1.0, 2.0)
   for (f32_union cand = base; cand.i < base.i + (1UL<<S); cand.i += 1UL<<(S-op)) {
-    double error = max(fabs(1.0 - double(cand.f) * left),
-                       fabs(1.0 - double(cand.f) * right));
+    double lerr = fabs(1.0 - double(cand.f) * left);
+    double rerr = fabs(1.0 - double(cand.f) * right);
+    double error = max(lerr,rerr);
     if (error < best_error) {
       best_error = error;
       best = cand;
+  //printf(" lerr %f in.f %f rerr %f in1.f %f\n", lerr, in.f, rerr, in1.f);
+      rsqrt_lut_errf[idx][LERR]  = lerr;  // error val per LUT entry
+      rsqrt_lut_errf[idx][LEFT]  = in.f;
+      rsqrt_lut_errf[idx][RERR]  = rerr;
+      rsqrt_lut_errf[idx][RIGHT] = in1.f;
     }
   }
 
@@ -96,7 +121,8 @@ uint32_t estimate_recip_sig(uint32_t idx)
 
   // Rightmost point on interval
   f32_union in1 = in.i + (1UL<<(S-ip));
-  double right = nextafter(double(in1.f), 0.0);
+  double right =          (double(in1.f)     );
+if (right != double(in1.f)) printf(" right != in1.f %A %A\n", right, double(in1.f));
 
   // Naively search the space of 2^P output values for the one that minimizes
   // the maximum error on the interval.  Since the function is monotonic,
@@ -106,11 +132,16 @@ uint32_t estimate_recip_sig(uint32_t idx)
   f32_union best = 0.0f;
   f32_union base = B << S; // [1.0, 2.0)
   for (f32_union cand = base; cand.i < base.i + (1UL<<S); cand.i += 1UL<<(S-op)) {
-    double error = max(fabs(1.0 - double(cand.f) * left),
-                       fabs(1.0 - double(cand.f) * right));
+    double lerr = fabs(1.0 - double(cand.f) * left);
+    double rerr = fabs(1.0 - double(cand.f) * right);
+    double error = max(lerr,rerr);
     if (error < best_error) {
       best_error = error;
       best = cand;
+      recip_lut_errf[idx][LERR]  = lerr;  // error val per LUT entry
+      recip_lut_errf[idx][LEFT]  = in.f;
+      recip_lut_errf[idx][RERR]  = rerr;
+      recip_lut_errf[idx][RIGHT] = in1.f;
     }
   }
 
@@ -229,7 +260,7 @@ void verilog()
   printf("  always @(*)\n");
   printf("    case (in)\n");
   for (size_t i = 0; i < ipN; i++)
-    printf("      %zu: out = %" PRIu32 ";\n", i, rsqrt_lut[i]);
+  printf("      %zu: out = %" PRIu32 ",;\n", i, rsqrt_lut[i]);
   printf("    endcase\n");
   printf("endmodule\n");
 
@@ -242,6 +273,75 @@ void verilog()
     printf("      %zu: out = %" PRIu32 ";\n", i, recip_lut[i]);
   printf("    endcase\n");
   printf("endmodule\n");
+}
+
+void detail(int detailn)
+{
+
+int lshift =  max(0,int(op - ip));
+int rshift =  max(0,int(ip - op));
+
+  printf("Recip%dx%dLUT (input [%d:0] in, output reg [%d:0] out);\n", ip, op, ip-1, op-1);
+  printf(" in[%d:0]  corresponds to sig[S-1:S-%d]\n", ip-1, ip-1);
+  printf(" out[%d:0] corresponds to sig[S-1:S-%d]\n", op-1, op-1);
+  printf(" biased : ((ipN-1) - in) << (op - ip) // or >> if neg\n");
+  printf(" base bias %d  left-shift %d right-shift %d\n",
+           int(((ipN - 1) << lshift)>>rshift), lshift, rshift);
+
+  for (size_t i = 0; i < ipN; i++) {
+    int bias = ((((ipN - 1) - i) << lshift)>>rshift);
+
+    printf(" %zu: out = %" PRIu32 " biased %d; lerr %G rerr %G larg %G rarg %G\n", i,
+               recip_lut[i],
+               int(bias - recip_lut[i]),
+               recip_lut_errf[i][LERR],
+               recip_lut_errf[i][RERR],
+               recip_lut_errf[i][LEFT],
+               recip_lut_errf[i][RIGHT]
+               );
+  }
+
+  printf("\n");
+
+  for (size_t i = 0; i < ipN; i++)
+
+    printf(" %zu: out = %X lerr %A rerr %A larg %A rarg %A\n", i,
+               recip_lut[i],
+               recip_lut_errf[i][LERR],
+               recip_lut_errf[i][RERR],
+               recip_lut_errf[i][LEFT],
+               recip_lut_errf[i][RIGHT]
+               );
+  printf("\n");
+
+  printf("RSqrt%dx%dLUT (input [%d:0] in, output reg [%d:0] out);\n", ip, op, ip-1, op-1);
+  printf("  // in[%d] corresponds to exp[0]\n", ip-1);
+  printf("  // in[%d:0] corresponds to sig[S-1:S-%d]\n", ip-2, ip-2);
+  printf("  // out[%d:0] corresponds to sig[S-1:S-%d]\n", op-1, op-1);
+  printf("  // biased : ((ipN-1) - in) << (op - ip)\n");
+  for (size_t i = 0; i < ipN; i++) {
+    int bias = ((((ipN - 1) - i) << lshift)>>rshift);
+
+    printf(" %zu: out %" PRIu32 " biased %d; lerr %G rerr %G larg %G rarg %G\n", i,
+               rsqrt_lut[i],
+               int(bias - rsqrt_lut[i]),
+               rsqrt_lut_errf[i][LERR],
+               rsqrt_lut_errf[i][RERR],
+               rsqrt_lut_errf[i][LEFT],
+               rsqrt_lut_errf[i][RIGHT]
+               );
+  }
+  printf("\n");
+  for (size_t i = 0; i < ipN; i++)
+        printf(" %zu: out = %X lerr %A rerr %A larg %A rarg %A\n", i,
+               rsqrt_lut[i],
+               rsqrt_lut_errf[i][LERR],
+               rsqrt_lut_errf[i][RERR],
+               rsqrt_lut_errf[i][LEFT],
+               rsqrt_lut_errf[i][RIGHT]
+               );
+  printf("\n");
+
 }
 
 void test(int testn)
@@ -257,7 +357,18 @@ void test(int testn)
        last    = 0x3F800000;
   }
 
-  double max_error = 0;
+  if (detailn == 1)
+    for (uint32_t i = 0; i < ipN; i++) {
+      recip_lut_errf[i][OTHER] = 0.0;
+      recip_lut_errf[i][OERR]  = 0.0;
+      rsqrt_lut_errf[i][OTHER] = 0.0;
+      rsqrt_lut_errf[i][OERR]  = 0.0;
+    }
+
+  double max_error = -1.0;
+  double max_errf  = -1.0;
+
+  int idx =-1;
 
   for (uint32_t i = first; i <= last; i++) {
     f32_union r = i;
@@ -267,19 +378,27 @@ void test(int testn)
     if (!isfinite(rcp)) {
       assert(!isfinite(1.0f / r.f));
     } else {
-      max_error = fmax(fabs(error), max_error);
-    } }
-  printf("max recip %dx%d error: 2^%g\n", ip, op, log2(max_error));
+      if (max_error < fabs(error)) {
+         max_error = fabs(error);
+         max_errf = r.f;
+      }
+    }
+  }
+  printf("max recip %dx%d error at %G: %G or 2^%g\n", ip, op, max_errf, max_error, log2(max_error));
 
 
-  max_error = 0;
+  max_error = -1.0;
+  max_errf  = -1.0;
 
   for (uint32_t i = firstsq; i <= last; i++) {
     f32_union r = i;
     double error = 1.0 - double(rsqrt(r.f)) * sqrt(double(r.f));
-    max_error = fmax(fabs(error), max_error);
+    if (max_error < fabs(error)) {
+       max_error = fabs(error);
+       max_errf = r.f;
+    }
   }
-  printf("max rsqrt %dx%d error: 2^%g\n", ip, op, log2(max_error));
+  printf("max rsqrt %dx%d error at %G: %G or  2^%g\n", ip, op, max_errf, max_error, log2(max_error));
 
 }
 
@@ -288,9 +407,6 @@ int main(int argc, char** argv)
 
   // handle arguements
 
-  int verilogn = 0;  // print verilog LUT definition
-  int testn    = 0;  // 1 is short test, 2 is long test
-  int summary  = 1;  // default 1 line summary of inputs and informatives
 
   if (argc > 1) {
     vector<string> args(argv + 0, argv + (argc));
@@ -303,6 +419,8 @@ int main(int argc, char** argv)
         testn = 2;
       if(*it == "--nosum")
         summary = 0;
+      if(*it == "--detail")
+        detailn = 1;
    }
   } else {
     printf(" No arguments were provided\n");
@@ -311,6 +429,7 @@ int main(int argc, char** argv)
     printf(" these can be followed by\n --verilog to print out LUT table definition \n");
     printf(" --test to test minimal range that covers the LUT table (default) -or- \n");
     printf(" --test-long which tests all single float non-NaN values\n");
+    printf(" --detail prints LUT entry values/errors\n");
     return (-1);
   }
 
@@ -338,6 +457,8 @@ if (verilogn == 0 && testn==0) testn = 1;
                 ip, op, int((1UL <<ip) * op), verilogn, testn);
 
   populate_luts();
+
+  if (detailn == 1)  detail(detailn);
 
   if (verilogn == 1) verilog();
   else if (testn==0) testn = 1;
